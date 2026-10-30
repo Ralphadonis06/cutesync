@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QueueSync – Clinic Queue Management</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@400;600;700;800&display=swap">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<style>
+:root{--bg:#f8fafc;--card:#fff;--tx:#0f172a;--mut:#475569;--ln:#e2e8f0;--navy:#1e3a8a;--teal:#0f766e;--red:#dc2626;--soft:#f0f7f7}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:"Nunito Sans",system-ui,"Segoe UI",sans-serif;font-size:16px;line-height:1.45}
+.card{background:var(--card);border:1px solid var(--ln);border-radius:18px;padding:22px;box-shadow:0 1px 2px rgba(15,23,42,.04)}
+.mut{color:var(--mut)}.ttl{font-size:20px;font-weight:800;color:var(--navy)}
+.in{width:100%;border:1.5px solid var(--ln);background:#fff;color:var(--tx);border-radius:12px;padding:12px 14px;font-size:17px}
+.in:focus,.btn:focus-visible,.tab:focus-visible{outline:3px solid #93a8e6;outline-offset:2px}
+.btn{min-height:50px;border-radius:12px;padding:0 20px;font-weight:700;font-size:17px;border:1.5px solid var(--ln);background:#fff;color:var(--tx);cursor:pointer;display:inline-flex;align-items:center;justify-content:center}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.p{background:var(--navy);border-color:var(--navy);color:#fff}
+.btn.t{background:var(--teal);border-color:var(--teal);color:#fff}
+.btn.r{background:#fff;border-color:var(--red);color:var(--red)}
+.tabs{display:flex;gap:4px;padding:5px;border-radius:14px;background:var(--soft);border:1px solid var(--ln);flex-wrap:wrap;width:fit-content}
+.tab{padding:10px 18px;border-radius:10px;font-weight:700;color:var(--mut);cursor:pointer;display:inline-flex;align-items:center}
+.tab.on{background:#fff;color:var(--teal);box-shadow:0 1px 3px rgba(15,23,42,.15)}
+.pill{border-radius:99px;padding:5px 16px;font-weight:700;background:#e0f5f1;color:var(--teal);cursor:pointer}.pill.off{background:#eef2f7;color:var(--mut)}
+.star{background:#fee2e2;color:#b91c1c;border-radius:99px;padding:3px 12px;font-weight:700;font-size:15px;white-space:nowrap}
+th{text-align:left;font-weight:700;padding:10px;color:var(--mut)}td{padding:12px 10px;border-top:1px solid var(--ln)}
+.mq{display:inline-block;padding-left:100%;white-space:nowrap;animation:mq 28s linear infinite}
+@keyframes mq{to{transform:translateX(-100%)}}
+@media (prefers-reduced-motion:reduce){.mq{animation:none;padding-left:0}}
+@media print{body *{visibility:hidden}#ticket,#ticket *{visibility:visible}#ticket{position:fixed;left:0;top:0;width:100%;border:0}}
+</style></head>
+<body><div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef}=React;
+
+// Address that phones scan the QR code to reach, e.g. 'http://192.168.1.10/queuesync/'. Leave '' to use this computer's address.
+const PUBLIC_URL='';
+
+/* ---------- API helper (same Apache server, so the login cookie just works) ---------- */
+async function api(file,o={}){
+ const q=o.params?'?'+new URLSearchParams(o.params):'';
+ const r=await fetch(file+q,{method:o.body?'POST':'GET',credentials:'same-origin',headers:o.body?{'Content-Type':'application/json'}:{},body:o.body?JSON.stringify(o.body):undefined});
+ const d=await r.json().catch(()=>({error:'Server error. Is Apache running?'}));
+ if(!r.ok)throw new Error(d.error||'Request failed');
+ return d;
+}
+const post=(file,body,params)=>api(file,{body:body||{},params});
+
+function usePoll(fn,ms,deps){
+ const [d,setD]=useState(null),[err,setErr]=useState(''),run=useRef();
+ useEffect(()=>{let on=true;
+  run.current=()=>fn().then(x=>{if(on){setD(x);setErr('')}}).catch(e=>{if(on)setErr(e.message)});
+  run.current();const i=setInterval(run.current,ms);return()=>{on=false;clearInterval(i)}},deps);
+ return [d,err,()=>run.current&&run.current()];
+}
+function useLoad(fn,deps){
+ const [d,setD]=useState(null),[e,setE]=useState('');
+ const go=()=>fn().then(x=>{setD(x);setE('')}).catch(x=>setE(x.message));
+ useEffect(()=>{go()},deps);return [d,go,e];
+}
+function useClock(){const [t,setT]=useState(Date.now());useEffect(()=>{const i=setInterval(()=>setT(Date.now()),1000);return()=>clearInterval(i)},[]);return t}
+
+/* ---------- helpers ---------- */
+const tm=ms=>ms?new Date(+ms).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'';
+const waitingOf=(tk,sid)=>tk.filter(t=>t.service_id===sid&&t.status==='Waiting').sort((a,b)=>(b.priority_type==='Priority')-(a.priority_type==='Priority')||a.created_ms-b.created_ms);
+const activeOf=(tk,sid)=>tk.find(t=>t.service_id===sid&&(t.status==='Called'||t.status==='Serving'));
+const NW=['zero','one','two','three','four','five','six','seven','eight','nine'];
+function speak(num,svc){try{const d=num.split('-')[1].split('').map(c=>NW[+c]).join(' ');const u=new SpeechSynthesisUtterance('Now serving, '+svc+' number '+d);u.rate=.85;speechSynthesis.cancel();speechSynthesis.speak(u)}catch(e){}}
+let AC=null;
+function enableSound(){try{AC=AC||new (window.AudioContext||window.webkitAudioContext)();AC.resume()}catch(e){}}
+function chime(){if(!AC)return;[[659,0],[523,.7]].forEach(([f,at])=>{const t=AC.currentTime+at,o=AC.createOscillator(),g=AC.createGain();o.type='sine';o.frequency.value=f;g.gain.setValueAtTime(.0001,t);g.gain.exponentialRampToValueAtTime(.5,t+.05);g.gain.exponentialRampToValueAtTime(.0001,t+1.2);o.connect(g);g.connect(AC.destination);o.start(t);o.stop(t+1.3)})}
+const patientUrl=(clinic,num)=>(PUBLIC_URL||location.origin+location.pathname)+'?clinic='+clinic+'&t='+num+'#patient';
+function QR({text}){let v='';try{const q=qrcode(0,'M');q.addData(text);q.make();v=q.createSvgTag(4,0)}catch(e){}return <div dangerouslySetInnerHTML={{__html:v}}/>}
+const Err=({m})=>m?<div className="mb-3 font-semibold" style={{color:'var(--red)'}}>{m}</div>:null;
+
+/* ---------- Login ---------- */
+function Login({onLogin}){
+ const [email,setEmail]=useState(''),[pw,setPw]=useState(''),[err,setErr]=useState(''),[busy,setBusy]=useState(false);
+ const go=async()=>{setBusy(true);setErr('');try{const r=await post('api_login.php',{email,password:pw});onLogin(r.user)}catch(e){setErr(e.message)}setBusy(false)};
+ 
+ // DEMO MODE FUNCTION
+ const enterDemo = () => {
+   onLogin({ name: "Demo Admin", role: "Super Admin", establishment_id: 1, assigned_service_id: null, isDemo: true });
+ };
+
+ return <div className="min-h-screen flex items-center justify-center p-4">
+  <div className="card w-full" style={{maxWidth:420}}>
+   <div className="flex items-center gap-3 mb-6"><span className="flex items-center justify-center text-white text-3xl font-bold" style={{background:'var(--navy)',width:46,height:46,borderRadius:12}}>+</span><div><div className="ttl">QueueSync</div><div className="mut">Clinic queue management</div></div></div>
+   <label className="block font-semibold mb-2" htmlFor="em">Email</label>
+   <input id="em" className="in mb-4" type="email" value={email} onChange={e=>setEmail(e.target.value)} autoFocus/>
+   <label className="block font-semibold mb-2" htmlFor="pw">Password</label>
+   <input id="pw" className="in mb-5" type="password" value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==='Enter'&&go()}/>
+   <Err m={err}/>
+   <button className="btn p w-full mb-3" disabled={busy||!email||!pw} onClick={go}>Login</button>
+   
+   {/* THE NEW DEMO MODE BUTTON */}
+   <button className="btn w-full" style={{color:'var(--navy)', borderColor:'var(--navy)'}} onClick={enterDemo}>
+     Enter Demo Mode (For Presentation)
+   </button>
+  </div></div>
+}
+
+
+/* ---------- Ticket modal ---------- */
+function TicketModal({t,clinicName,clinicId,onClose}){
+ return <div className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-auto" style={{background:'rgba(15,23,42,.6)'}}>
+  <div style={{width:340}}>
+   <div id="ticket" style={{background:'#fff',color:'#0f172a',borderRadius:24,overflow:'hidden',border:'1px solid #e2e8f0',textAlign:'center'}}>
+    <div style={{background:'#1e3a8a',color:'#fff',padding:'18px 22px',textAlign:'left'}}><div style={{opacity:.9}}>{clinicName}</div><div style={{fontSize:28,fontWeight:700}}>{t.service_name}</div></div>
+    <div style={{padding:'22px 20px 16px'}}>
+     <div style={{fontWeight:600,letterSpacing:'.14em',color:'#475569',fontSize:14}}>YOUR NUMBER</div>
+     <div style={{fontSize:64,fontWeight:800,margin:'8px 0 12px',color:'#1e3a8a'}}>{t.queue_number}</div>
+     {t.priority_type==='Priority'&&<span className="star" style={{fontSize:16,padding:'6px 16px'}}>★ PRIORITY</span>}
+     <div style={{fontSize:20,fontWeight:700,marginTop:12}}>{t.patient_name}</div>
+     <div style={{color:'#475569'}}>{new Date(t.created_ms).toLocaleDateString([],{month:'short',day:'numeric'})} · {tm(t.created_ms)}</div>
+     <div className="flex justify-center mt-4"><QR text={patientUrl(clinicId,t.queue_number)}/></div>
+     <div style={{marginTop:10,fontSize:16,fontWeight:600,color:'#475569'}}>Scanning the QR code is optional</div>
+    </div>
+    <div style={{background:'#f8fafc',borderTop:'2px dashed #e2e8f0',padding:'12px 20px',textAlign:'left'}}><span style={{color:'#475569'}}>Patients ahead</span> <b style={{fontSize:22,float:'right'}}>{t.ahead}</b></div>
+    <div style={{padding:12,color:'#475569'}}>Please listen for your number.</div>
+   </div>
+   <div className="flex gap-3 mt-4"><button className="btn p flex-1" onClick={()=>window.print()}>Print ticket</button><button className="btn flex-1" onClick={onClose}>Done</button></div>
+  </div></div>
+}
+
+/* ---------- Teller desk ---------- */
+function Teller({user}){
+ const clinic=user.establishment_id;
+ const [d,err,reload]=usePoll(()=>api('api_get_queue.php',{params:{establishment_id:clinic}}),3000,[clinic]);
+ const [name,setName]=useState(''),[rs,setRs]=useState(0),[pr,setPr]=useState(false),[tk,setTk]=useState(null),[msg,setMsg]=useState(''),[busy,setBusy]=useState(false);
+ if(!d)return <div className="card">{err||'Loading…'}</div>;
+ const sid=user.assigned_service_id,sv=d.services.find(x=>x.id===sid)||{name:'No department',color:'#475569'};
+ const open=d.services.filter(x=>x.is_active),reg=open.find(x=>x.id===rs)?rs:(open[0]||{}).id;
+ const cur=activeOf(d.tickets,sid),q=waitingOf(d.tickets,sid),held=d.tickets.filter(t=>t.service_id===sid&&t.status==='Skipped');
+ const run=async fn=>{setBusy(true);setMsg('');try{await fn();await reload()}catch(e){setMsg(e.message)}setBusy(false)};
+ const submit=()=>run(async()=>{const r=await post('api_create_ticket.php',{service_id:reg,patient_name:name.trim(),priority:pr});setTk(r.ticket);setName('');setPr(false)});
+ const call=()=>run(async()=>{const r=await post('api_update_status.php',{action:'call_next',service_id:sid});speak(r.ticket.queue_number,r.ticket.service_name)});
+ const act=(action,t)=>run(()=>post('api_update_status.php',{action,ticket_id:t.id}));
+ return <div className="grid lg:grid-cols-[340px_1fr] gap-5 items-start">
+  <div className="card">
+   <h2 className="ttl mb-4">Register patient</h2>
+   <label className="block font-semibold mb-2" htmlFor="pn">Patient name or reference ID</label>
+   <input id="pn" className="in mb-4" value={name} onChange={e=>setName(e.target.value)} placeholder="e.g. Maria Santos"/>
+   <div className="font-semibold mb-2">Service</div>
+   <div className="grid gap-2 mb-4">{open.map(x=><label key={x.id} className="flex items-center gap-3 p-3 rounded-xl cursor-pointer" style={{border:'2px solid '+(reg===x.id?x.color:'var(--ln)'),background:reg===x.id?x.color+'14':'#fff'}}>
+    <input type="radio" name="svc" checked={reg===x.id} onChange={()=>setRs(x.id)}/><b>{x.name}</b><span className="ml-auto mut">{x.prefix}</span></label>)}</div>
+   <label className="flex items-start gap-3 p-3 rounded-xl mb-4 cursor-pointer" style={{background:'#fef2f2',color:'#b91c1c',border:'2px solid '+(pr?'#dc2626':'#fecaca')}}>
+    <input type="checkbox" className="mt-1" checked={pr} onChange={e=>setPr(e.target.checked)}/><span><b className="block">Priority patient</b><span>Senior · PWD · Pregnant — moves to the front</span></span></label>
+   <Err m={msg}/>
+   <button className="btn p w-full" disabled={busy||!reg} onClick={submit}>Generate ticket</button>
+   <div className="flex justify-between mt-5 pt-4 mut" style={{borderTop:'1px solid var(--ln)'}}><span>Tickets issued today</span><b style={{color:'var(--tx)'}}>{d.tickets.length} / {d.establishment.ticket_limit}</b></div>
+  </div>
+  <div className="grid gap-5">
+   <div className="card" style={{borderLeft:'8px solid '+sv.color}}>
+    <div className="flex items-center gap-3 flex-wrap mb-2"><h2 className="ttl">{sv.name} queue</h2>{!sv.is_active&&<span className="font-bold" style={{color:'var(--red)'}}>Service is closed</span>}<span className="ml-auto mut">{d.establishment.name}</span></div>
+    <div className="font-bold mut" style={{letterSpacing:'.1em'}}>{cur?(cur.status==='Called'?'CALLED · WAITING FOR PATIENT':'NOW SERVING'):'NO ACTIVE PATIENT'}</div>
+    <div style={{fontSize:'clamp(56px,9vw,96px)',fontWeight:800,lineHeight:1.05,color:'var(--navy)'}}>{cur?cur.queue_number:'—'}</div>
+    <div className="font-semibold mb-4" style={{fontSize:20}}>{cur?cur.patient_name:'Press Call next to begin'}</div>
+    <div className="flex flex-wrap gap-3">
+     <button className="btn t" disabled={busy||!!cur||!q.length||!sv.is_active} onClick={call}>Call next</button>
+     <button className="btn p" disabled={busy||!cur||cur.status!=='Called'} onClick={()=>act('serving',cur)}>Mark as serving</button>
+     <button className="btn t" disabled={busy||!cur} onClick={()=>act('complete',cur)}>Mark completed</button>
+     <button className="btn r" disabled={busy||!cur} onClick={()=>act('skip',cur)}>No-show / Skip</button>
+     <button className="btn" disabled={!cur} onClick={()=>speak(cur.queue_number,sv.name)}>🔊 Repeat</button>
+    </div>
+   </div>
+   <div className="card overflow-x-auto">
+    <h3 className="ttl mb-2">Waiting ({q.length})</h3>
+    <table className="w-full"><thead><tr><th>#</th><th>Ticket</th><th>Patient</th><th></th><th>Arrived</th></tr></thead><tbody>
+     {q.map((t,i)=><tr key={t.id}><td>{i+1}</td><td><b>{t.queue_number}</b></td><td>{t.patient_name}</td><td>{t.priority_type==='Priority'&&<span className="star">★ Priority</span>}</td><td>{tm(t.created_ms)}</td></tr>)}
+     {!q.length&&<tr><td colSpan="5" className="mut">No patients waiting.</td></tr>}</tbody></table>
+   </div>
+   <div className="card overflow-x-auto">
+    <h3 className="ttl mb-2">Held / skipped ({held.length})</h3>
+    <table className="w-full"><tbody>
+     {held.map(t=><tr key={t.id}><td><b>{t.queue_number}</b></td><td>{t.patient_name}</td><td style={{textAlign:'right'}}><button className="btn" disabled={busy} onClick={()=>act('recall',t)}>Recall</button></td></tr>)}
+     {!held.length&&<tr><td className="mut">No held tickets.</td></tr>}</tbody></table>
+   </div>
+  </div>
+  {tk&&<TicketModal t={tk} clinicName={d.establishment.name} clinicId={clinic} onClose={()=>setTk(null)}/>}
+ </div>
+}
+
+/* ---------- TV display (public: open  index.html?clinic=1#tv ) ---------- */
+function TV(){
+ const clinic=new URLSearchParams(location.search).get('clinic')||'';
+ const [d,err]=usePoll(()=>api('api_get_queue.php',{params:clinic?{establishment_id:clinic}:{}}),3000,[]);
+ const now=useClock(),prev=useRef(null),[snd,setSnd]=useState(false);
+ useEffect(()=>{if(!d)return;const cur={};d.services.forEach(s=>{const a=activeOf(d.tickets,s.id);cur[s.id]=a?a.queue_number:''});
+  if(prev.current&&d.services.some(s=>cur[s.id]&&cur[s.id]!==prev.current[s.id]))chime();prev.current=cur},[d]);
+ if(!d)return <div className="p-10" style={{fontSize:28}}>{err||'Loading…'}</div>;
+ const cols=Math.max(1,d.services.length),k=Math.min(1,3/cols),nf=Math.min(9,(94/cols-3)/4.4);
+ return <div className="fixed inset-0 flex flex-col" style={{background:'#fff'}}>
+  <div className="flex items-center gap-4 px-10 py-4" style={{borderBottom:'1px solid var(--ln)'}}>
+   <span className="flex items-center justify-center text-white font-bold" style={{background:'var(--navy)',borderRadius:12,width:'3.4vw',height:'3.4vw',fontSize:'2vw'}}>+</span>
+   <div className="font-bold" style={{fontSize:'2.4vw',color:'var(--navy)'}}>{d.establishment.name}</div>
+   <div className="ml-auto mut" style={{fontSize:'1.7vw'}}>Please listen for your number</div>
+   <div className="font-bold pl-5" style={{fontSize:'2.4vw',borderLeft:'1px solid var(--ln)'}}>{tm(now)}</div>
+   {!snd&&<button className="btn p" onClick={()=>{enableSound();setSnd(true);chime()}}>🔔 Enable sound</button>}
+  </div>
+  <div className="flex-1 grid gap-6 p-6 min-h-0" style={{gridTemplateColumns:'repeat('+cols+',minmax(0,1fr))',background:'var(--bg)'}}>
+   {d.services.map(x=>{const c=activeOf(d.tickets,x.id),n=waitingOf(d.tickets,x.id).slice(0,3);
+    return <div key={x.id} className="flex flex-col rounded-3xl overflow-hidden" style={{background:'#fff',border:'1px solid var(--ln)',borderTop:'1.2vw solid '+x.color}}>
+     <div className="text-center font-bold py-4" style={{color:'var(--navy)',fontSize:(2.8*k)+'vw'}}>{x.name}</div>
+     {x.is_active?<>
+      <div className="flex-1 flex flex-col items-center justify-center">
+       <div className="font-semibold mut" style={{fontSize:(1.6*k)+'vw',letterSpacing:'.16em'}}>NOW SERVING</div>
+       <div className="font-extrabold" style={{fontSize:nf+'vw',color:'var(--navy)',lineHeight:1.1,whiteSpace:'nowrap'}}>{c?c.queue_number:'—'}</div>
+      </div>
+      <div style={{borderTop:'1px solid var(--ln)',padding:'1.4vw 1.6vw',background:'var(--bg)'}}>
+       <div className="font-semibold mut mb-2" style={{fontSize:(1.3*k)+'vw',letterSpacing:'.14em'}}>NEXT</div>
+       <div className="flex flex-wrap gap-2" style={{minHeight:'3.6vw'}}>{n.length?n.map(t=><span key={t.id} className="font-bold" style={{background:'#fff',border:'1px solid var(--ln)',borderRadius:12,padding:'.5vw 1.1vw',fontSize:(2*k)+'vw',whiteSpace:'nowrap'}}>{t.queue_number}</span>):<span className="mut" style={{fontSize:(2*k)+'vw'}}>—</span>}</div>
+      </div>
+     </>:<div className="flex-1 flex items-center justify-center font-semibold mut" style={{fontSize:(2.4*k)+'vw'}}>Service closed today</div>}
+    </div>})}
+  </div>
+  <div className="overflow-hidden py-4 text-white" style={{background:'var(--navy)',fontSize:'2.1vw'}}><span className="mq">📢 {d.announcement}</span></div>
+ </div>
+}
+
+/* ---------- Patient phone page (QR destination) ---------- */
+function Patient(){
+ const sp=new URLSearchParams(location.search),clinic=sp.get('clinic')||'',t0=(sp.get('t')||'').toUpperCase();
+ const [d]=usePoll(()=>api('api_get_queue.php',{params:clinic?{establishment_id:clinic}:{}}),4000,[]);
+ const [q,setQ]=useState(t0),[go,setGo]=useState(t0);
+ const t=d&&go?d.tickets.find(x=>x.queue_number===go.trim()):null,sv=t?d.services.find(x=>x.id===t.service_id):null;
+ const cur=t?activeOf(d.tickets,t.service_id):null,ahead=t&&t.status==='Waiting'?waitingOf(d.tickets,t.service_id).findIndex(x=>x.id===t.id):0;
+ const msg=!t?'':t.status==='Called'?'It is your turn. Please go to the counter.':t.status==='Serving'?'You are being served.':t.status==='Completed'?'Your visit is complete. Thank you!':t.status==='Skipped'?'Your number was skipped. Please see the teller.':'Please wait. Listen for your number.';
+ return <div className="max-w-md mx-auto p-5" style={{minHeight:'100vh'}}>
+  <div className="flex items-center gap-3 mb-5"><span className="flex items-center justify-center text-white text-2xl font-bold" style={{background:'var(--navy)',width:42,height:42,borderRadius:12}}>+</span><b className="ttl">QueueSync</b><button className="btn ml-auto" onClick={()=>{location.href=location.pathname}}>Exit</button></div>
+  <div className="card mb-4"><label className="block font-semibold mb-2" htmlFor="pq">Ticket number</label>
+   <div className="flex gap-2"><input id="pq" className="in" value={q} onChange={e=>setQ(e.target.value.toUpperCase())} placeholder="e.g. CON-005"/><button className="btn p" onClick={()=>setGo(q)}>Check</button></div></div>
+  {go&&d&&!t&&<div className="card" style={{fontSize:20}}>Ticket not found. Please check the number on your ticket.</div>}
+  {t&&<div className="card text-center" style={{borderTop:'8px solid '+sv.color}}>
+   <div className="mut" style={{fontSize:20}}>{sv.name}</div>
+   <div className="mut font-semibold" style={{fontSize:18,marginTop:12}}>Your number</div>
+   <div className="font-extrabold" style={{fontSize:56,color:'var(--navy)',lineHeight:1.1}}>{t.queue_number}</div>
+   <div className="mut font-semibold" style={{fontSize:18,marginTop:16}}>Currently serving</div>
+   <div className="font-extrabold" style={{fontSize:40}}>{cur?cur.queue_number:'—'}</div>
+   {t.status==='Waiting'&&<div style={{fontSize:22,marginTop:14}}>Patients ahead of you: <b>{ahead}</b></div>}
+   <div className="font-bold" style={{fontSize:22,marginTop:16,color:'var(--teal)'}}>{msg}</div>
+  </div>}
+ </div>
+}
+
+/* ---------- Admin dashboard ---------- */
+function Analytics({cid}){
+ const [days,setDays]=useState(1);
+ const [d,,e]=useLoad(()=>api('api_admin.php',{params:{action:'analytics',days,establishment_id:cid}}),[days,cid]);
+ if(!d)return <div className="card">{e||'Loading…'}</div>;
+ const S=d.services,sum=k=>S.reduce((a,x)=>a+x[k],0),timed=sum('timed'),avg=timed?Math.round(S.reduce((a,x)=>a+x.avg_wait_min*x.timed,0)/timed):0,mx=Math.max(1,...S.map(x=>x.total));
+ return <div className="grid gap-5">
+  <div className="tabs ml-auto">{[[1,'Today'],[7,'7 days'],[30,'30 days']].map(([v,l])=><button key={v} className={'tab '+(days===v?'on':'')} onClick={()=>setDays(v)}>{l}</button>)}</div>
+  <div className="grid sm:grid-cols-3 gap-4">
+   {[['Patients served',sum('served'),'var(--teal)'],['Average wait',avg+' min','var(--navy)'],['No-shows / skipped',sum('skipped'),'var(--red)']].map(([l,v,c])=><div key={l} className="card" style={{borderLeft:'6px solid '+c}}><div className="mut font-semibold">{l}</div><div style={{fontSize:44,fontWeight:800}}>{v}</div></div>)}
+  </div>
+  <div className="grid md:grid-cols-2 gap-4">
+   <div className="card"><h3 className="ttl mb-2">Average wait per department</h3>{S.map(x=><div key={x.id} className="flex justify-between py-2" style={{borderTop:'1px solid var(--ln)'}}><span>{x.name}</span><b>{x.avg_wait_min} min</b></div>)}</div>
+   <div className="card"><h3 className="ttl mb-3">Ticket volume</h3>
+    <div className="flex items-end gap-6" style={{height:190}}>{S.map(x=><div key={x.id} className="flex-1 flex flex-col items-center justify-end h-full"><b>{x.total}</b><div className="w-full rounded-t-lg" style={{height:(x.total/mx*80)+'%',background:x.color,minHeight:3}}/></div>)}</div>
+    <div className="flex gap-6 mt-2">{S.map(x=><div key={x.id} className="flex-1 text-center mut">{x.name}</div>)}</div></div>
+  </div></div>
+}
+function Services({cid}){
+ const [d,go,e]=useLoad(()=>api('api_admin.php',{params:{action:'services',establishment_id:cid}}),[cid]);
+ const [f,setF]=useState({sn:'',sp:''}),[m,setM]=useState('');
+ const doit=async fn=>{setM('');try{await fn();await go()}catch(x){setM(x.message)}};
+ if(!d)return <div className="card">{e||'Loading…'}</div>;
+ return <div className="card"><h3 className="ttl">Services</h3><p className="mut mb-2">Open or close a counter</p>
+  {d.services.map(x=><div key={x.id} className="flex items-center gap-3 py-3" style={{borderTop:'1px solid var(--ln)'}}><span style={{width:12,height:12,background:x.color,borderRadius:3}}/><b>{x.name}</b><span className="mut">{x.prefix}</span>
+   <button className={'pill ml-auto '+(x.is_active?'':'off')} onClick={()=>doit(()=>post('api_admin.php',{service_id:x.id,establishment_id:cid},{action:'toggle_service'}))}>{x.is_active?'Open':'Closed'}</button></div>)}
+  <div className="grid sm:grid-cols-3 gap-3 mt-4"><input className="in" placeholder="New service (e.g. Dental)" value={f.sn} onChange={e=>setF({...f,sn:e.target.value})}/><input className="in" placeholder="Prefix (e.g. DEN)" maxLength="5" value={f.sp} onChange={e=>setF({...f,sp:e.target.value.toUpperCase()})}/>
+   <button className="btn p" disabled={!f.sn||!f.sp} onClick={()=>doit(async()=>{await post('api_admin.php',{name:f.sn,prefix:f.sp,establishment_id:cid},{action:'add_service'});setF({sn:'',sp:''})})}>Add service</button></div>
+  <Err m={m}/></div>
+}
+function Staff({cid,sa}){
+ const [d,go,e]=useLoad(()=>api('api_admin.php',{params:{action:'staff',establishment_id:cid}}),[cid]);
+ const [sv]=useLoad(()=>api('api_admin.php',{params:{action:'services',establishment_id:cid}}),[cid]);
+ const [f,setF]=useState({name:'',email:'',role:'Teller',sid:''}),[tmp,setTmp]=useState({}),[m,setM]=useState('');
+ const doit=async fn=>{setM('');try{await fn();await go()}catch(x){setM(x.message)}};
+ if(!d||!sv)return <div className="card">{e||'Loading…'}</div>;
+ const sid=f.sid||(sv.services[0]||{}).id;
+ return <div className="card overflow-x-auto"><h3 className="ttl mb-2">Staff accounts</h3>
+  <table className="w-full"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Department</th><th></th></tr></thead><tbody>
+   {d.staff.map(x=><tr key={x.id}><td><b>{x.name}</b></td><td>{x.email}</td><td>{x.role}</td>
+    <td>{x.role==='Teller'?<select className="in" style={{width:'auto'}} value={x.assigned_service_id||''} onChange={ev=>doit(()=>post('api_admin.php',{staff_id:x.id,service_id:+ev.target.value,establishment_id:cid},{action:'set_staff_service'}))}>{sv.services.map(v=><option key={v.id} value={v.id}>{v.name}</option>)}</select>:'All'}</td>
+    <td>{tmp[x.id]?<span>New password: <code className="font-bold">{tmp[x.id]}</code></span>:<button className="btn" onClick={()=>doit(async()=>{const r=await post('api_admin.php',{staff_id:x.id,establishment_id:cid},{action:'reset_password'});setTmp({...tmp,[x.id]:r.temp_password})})}>Reset password</button>}</td></tr>)}
+   {!d.staff.length&&<tr><td colSpan="5" className="mut">No staff yet.</td></tr>}</tbody></table>
+  <div className="grid md:grid-cols-5 gap-3 mt-5">
+   <input className="in" placeholder="Name" value={f.name} onChange={ev=>setF({...f,name:ev.target.value})}/>
+   <input className="in" type="email" placeholder="Email" value={f.email} onChange={ev=>setF({...f,email:ev.target.value})}/>
+   <select className="in" aria-label="Role" value={f.role} onChange={ev=>setF({...f,role:ev.target.value})}><option>Teller</option>{sa&&<option>Clinic Manager</option>}</select>
+   <select className="in" aria-label="Department" disabled={f.role!=='Teller'} value={sid||''} onChange={ev=>setF({...f,sid:ev.target.value})}>{sv.services.map(v=><option key={v.id} value={v.id}>{v.name}</option>)}</select>
+   <button className="btn p" disabled={!f.name||!f.email} onClick={()=>doit(async()=>{const r=await post('api_admin.php',{name:f.name,email:f.email,role:f.role,service_id:+sid,establishment_id:cid},{action:'add_staff'});alert('Account created.\nTemporary password: '+r.temp_password+'\n(Write it down - it is shown only once.)');setF({name:'',email:'',role:'Teller',sid:''})})}>Create account</button></div>
+  <Err m={m}/><p className="mut mt-2">Temporary passwords are shown once. Give them to the staff member.</p></div>
+}
+function Announcements({cid}){
+ const [d,go,e]=useLoad(()=>api('api_announcements.php',{params:{establishment_id:cid}}),[cid]);
+ const [txt,setTxt]=useState(''),[m,setM]=useState('');
+ const send=async()=>{setM('');try{await post('api_announcements.php',{message:txt,establishment_id:cid});setTxt('');await go()}catch(x){setM(x.message)}};
+ return <div className="card"><h3 className="ttl mb-3">Announcement board</h3>
+  <textarea className="in mb-3" rows="3" maxLength="255" aria-label="Announcement" placeholder="e.g. Doctor is on a 15-minute break" value={txt} onChange={ev=>setTxt(ev.target.value)}/>
+  <Err m={m}/><button className="btn p" disabled={!txt.trim()} onClick={send}>Post to TV display</button>
+  <h4 className="font-bold mt-6 mb-1">Recent</h4>
+  {d?d.announcements.map((a,i)=><div key={a.id} className="flex py-2 gap-3" style={{borderTop:'1px solid var(--ln)'}}>{a.message}<span className="mut ml-auto whitespace-nowrap">{tm(a.created_ms)}{i===0?' · on screen':''}</span></div>):e}</div>
+}
+function Clinics({cid,setCid}){
+ const [d,go,e]=useLoad(()=>api('api_admin.php',{params:{action:'clinics'}}),[]);
+ const [f,setF]=useState({n:'',l:''}),[m,setM]=useState('');
+ const doit=async fn=>{setM('');try{await fn();await go()}catch(x){setM(x.message)}};
+ if(!d)return <div className="card">{e||'Loading…'}</div>;
+ return <div className="card overflow-x-auto"><h3 className="ttl mb-2">Clinics</h3>
+  <table className="w-full"><thead><tr><th>Clinic</th><th>Join code</th><th>Daily ticket limit</th></tr></thead><tbody>
+   {d.clinics.map(x=><tr key={x.id}><td><button className="underline font-bold" title="Manage this clinic" onClick={()=>setCid(x.id)}>{x.name}{x.id===cid?' ✓':''}</button></td><td><code>{x.join_code}</code></td>
+    <td><input type="number" min="1" className="in" style={{width:110}} defaultValue={x.ticket_limit} onBlur={ev=>doit(()=>post('api_admin.php',{ticket_limit:+ev.target.value,establishment_id:x.id},{action:'set_limit'}))}/></td></tr>)}</tbody></table>
+  <div className="grid sm:grid-cols-3 gap-3 mt-5"><input className="in" placeholder="New clinic name" value={f.n} onChange={ev=>setF({...f,n:ev.target.value})}/><input className="in" type="number" placeholder="Ticket limit" value={f.l} onChange={ev=>setF({...f,l:ev.target.value})}/>
+   <button className="btn p" disabled={!f.n} onClick={()=>doit(async()=>{const r=await post('api_admin.php',{name:f.n,ticket_limit:+f.l||100},{action:'add_clinic'});setF({n:'',l:''});setCid(r.id)})}>Create clinic</button></div>
+  <Err m={m}/><p className="mut mt-2">A new clinic starts with Consultation, Laboratory and Pharmacy. Click its name to add staff.</p></div>
+}
+function Admin({user}){
+ const sa=user.role==='Super Admin',[tab,setTab]=useState('analytics'),[cid,setCid]=useState(user.establishment_id||0);
+ const [cl]=useLoad(()=>sa?api('api_admin.php',{params:{action:'clinics'}}):Promise.resolve({clinics:[]}),[cid]);
+ useEffect(()=>{if(sa&&!cid&&cl&&cl.clinics[0])setCid(cl.clinics[0].id)},[cl]);
+ const tabs=[['analytics','Analytics'],['services','Services'],['staff','Staff'],['ann','Announcements'],...(sa?[['clinics','Clinics']]:[])];
+ const name=sa&&cl?(cl.clinics.find(x=>x.id===cid)||{}).name:'';
+ return <div className="grid gap-5">
+  <div className="flex flex-wrap items-center gap-3"><div className="tabs">{tabs.map(([k,l])=><button key={k} className={'tab '+(tab===k?'on':'')} onClick={()=>setTab(k)}>{l}</button>)}</div>
+   {sa&&cl&&cl.clinics.length>0&&<label className="ml-auto flex items-center gap-2"><span className="mut font-semibold">Clinic</span><select className="in" style={{width:'auto'}} value={cid} onChange={ev=>setCid(+ev.target.value)}>{cl.clinics.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></label>}</div>
+  {cid>0&&<>
+   {tab==='analytics'&&<Analytics cid={cid}/>}{tab==='services'&&<Services cid={cid}/>}{tab==='staff'&&<Staff cid={cid} sa={sa}/>}
+   {tab==='ann'&&<Announcements cid={cid}/>}{tab==='clinics'&&sa&&<Clinics cid={cid} setCid={setCid}/>}</>}
+ </div>
+}
+
+/* ---------- App: login, then the right desk for the role ---------- */
+function App(){
+ const [hash,setHash]=useState(location.hash.slice(1)),[user,setUser]=useState(undefined);
+ useEffect(()=>{const f=()=>setHash(location.hash.slice(1));addEventListener('hashchange',f);return()=>removeEventListener('hashchange',f)},[]);
+ useEffect(()=>{api('api_login.php',{params:{action:'me'}}).then(r=>setUser(r.user)).catch(()=>setUser(null))},[]);
+ if(hash==='tv')return <TV/>;
+ if(hash==='patient')return <Patient/>;
+ if(user===undefined)return <div className="p-10">Loading…</div>;
+ if(!user)return <Login onLogin={setUser}/>;
+ const admin=user.role!=='Teller';
+ const logout=async()=>{try{await post('api_login.php',{},{action:'logout'})}catch(e){}setUser(null)};
+ return <div className="max-w-[1400px] mx-auto p-4 sm:p-6">
+    <header className="flex flex-wrap items-center gap-4 mb-5 p-4 rounded-2xl" style={{background:'#fff',border:'1px solid var(--ln)',borderTop:'4px solid var(--navy)'}}>
+   <div className="flex items-center gap-3"><span className="flex items-center justify-center text-white text-3xl font-bold" style={{background:'var(--navy)',width:44,height:44,borderRadius:12}}>+</span><div><div className="ttl" style={{lineHeight:1.1}}>QueueSync</div><div className="mut">{admin?'Admin desk':'Teller desk'}</div></div></div>
+   
+   <a className="tab" style={{border:'1px solid var(--ln)'}} href={'?clinic='+(user.establishment_id||1)+'#tv'} target="_blank">TV Display ↗</a>
+   
+   {/* DEMO MODE DROPDOWN */}
+   {user.isDemo && (
+     <div className="flex items-center gap-2 ml-4 pl-4" style={{borderLeft:'1px solid var(--ln)'}}>
+       <span className="font-bold text-sm" style={{color:'var(--navy)'}}>DEMO SWITCH:</span>
+       <select className="in" style={{width:'auto', padding:'8px', minHeight:'auto'}} 
+         value={user.role === 'Teller' ? 'teller' : 'admin'} 
+         onChange={(e) => {
+            if(e.target.value === 'teller') setUser({...user, role: 'Teller', name: 'Nurse Ana', assigned_service_id: 1});
+            if(e.target.value === 'admin') setUser({...user, role: 'Super Admin', name: 'Demo Admin', assigned_service_id: null});
+         }}>
+         <option value="admin">Admin View</option>
+         <option value="teller">Teller View</option>
+       </select>
+     </div>
+   )}
+
+   <div className="ml-auto flex items-center gap-3">
+    <div className="text-right"><b className="block">{user.name}</b><span className="mut">{user.role}{user.service_name?' · '+user.service_name:''}</span></div>
+    <button className="btn" onClick={logout}>Logout</button></div>
+  </header>
+  {admin?<Admin user={user}/>:<Teller user={user}/>}
+ </div>
+ ;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script></body></html>
