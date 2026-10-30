@@ -25,12 +25,13 @@ $services = array_map(fn($r) => [
 // Patient names are only sent to logged-in staff of this clinic (the TV and patient page get numbers only).
 $staffView = $user && ($user['role'] === 'Super Admin' || (int)$user['establishment_id'] === $clinic);
 
+// Only fetch TODAY's tickets
 $st = $pdo->prepare(
     'SELECT t.id, t.queue_number, t.service_id, t.patient_name, t.status, t.priority_type,
             UNIX_TIMESTAMP(t.created_at) * 1000 AS created_ms,
             UNIX_TIMESTAMP(t.served_at)  * 1000 AS served_ms
        FROM tickets t JOIN services s ON s.id = t.service_id
-      WHERE s.establishment_id = ? AND t.ticket_date = CURDATE()
+      WHERE s.establishment_id = ? AND DATE(t.created_at) = CURDATE()
       ORDER BY t.created_at, t.id'
 );
 $st->execute([$clinic]);
