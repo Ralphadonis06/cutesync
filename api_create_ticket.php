@@ -32,9 +32,10 @@ try {
     }
     if (!$sv['is_active']) { $pdo->rollBack(); json_out(['error' => 'This service is closed today'], 409); }
 
+    // Count today's tickets for the limit
     $st = $pdo->prepare(
         'SELECT COUNT(*) FROM tickets t JOIN services s ON s.id = t.service_id
-          WHERE s.establishment_id = ? AND t.ticket_date = CURDATE()'
+          WHERE s.establishment_id = ? AND DATE(t.created_at) = CURDATE()'
     );
     $st->execute([$sv['establishment_id']]);
     if ((int)$st->fetchColumn() >= (int)$sv['ticket_limit']) {
@@ -42,23 +43,25 @@ try {
         json_out(['error' => 'Daily ticket limit reached (' . $sv['ticket_limit'] . ')'], 409);
     }
 
+    // Find the max number FOR TODAY ONLY
     $st = $pdo->prepare(
         "SELECT COALESCE(MAX(CAST(SUBSTRING_INDEX(queue_number, '-', -1) AS UNSIGNED)), 0) + 1
-           FROM tickets WHERE service_id = ? AND ticket_date = CURDATE()"
+           FROM tickets WHERE service_id = ? AND DATE(created_at) = CURDATE()"
     );
     $st->execute([$sid]);
     $number = $sv['prefix'] . '-' . str_pad((string)$st->fetchColumn(), 3, '0', STR_PAD_LEFT);
 
     // People ahead: priority patients only count other priority patients.
-    $sql = "SELECT COUNT(*) FROM tickets WHERE service_id = ? AND ticket_date = CURDATE() AND status = 'Waiting'"
+    $sql = "SELECT COUNT(*) FROM tickets WHERE service_id = ? AND DATE(created_at) = CURDATE() AND status = 'Waiting'"
          . ($prio ? " AND priority_type = 'Priority'" : '');
     $st = $pdo->prepare($sql);
     $st->execute([$sid]);
     $ahead = (int)$st->fetchColumn();
 
+    // Insert the ticket. We just use NOW() for created_at
     $st = $pdo->prepare(
-        'INSERT INTO tickets (queue_number, ticket_date, service_id, patient_name, priority_type)
-         VALUES (?, CURDATE(), ?, ?, ?)'
+        'INSERT INTO tickets (queue_number, service_id, patient_name, priority_type, created_at)
+         VALUES (?, ?, ?, ?, NOW())'
     );
     $st->execute([$number, $sid, $name, $prio ? 'Priority' : 'Regular']);
     $id = (int)$pdo->lastInsertId();
